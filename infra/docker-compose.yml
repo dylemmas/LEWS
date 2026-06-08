@@ -1,0 +1,136 @@
+version: '3.9'
+
+services:
+  postgres:
+    image: timescale/timescaledb-ha:pg15
+    container_name: lews-postgres
+    environment:
+      POSTGRES_DB: lews
+      POSTGRES_USER: lews
+      POSTGRES_PASSWORD: lews_dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./timescaledb/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lews -d lews"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: lews-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    container_name: lews-api
+    environment:
+      DATABASE_URL: postgresql+asyncpg://lews:lews_dev@postgres:5432/lews
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-change-in-prod}
+      JWT_ACCESS_EXPIRE_MINUTES: 15
+      JWT_REFRESH_EXPIRE_DAYS: 30
+      HMAC_SECRET: ${HMAC_SECRET:-dev-hmac-secret-change-in-prod}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+      SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL:-noreply@lews.dev}
+      ML_MODEL_PATH: /app/ml/model_v1.joblib
+      ML_THRESHOLDS_WATCH: 0.30
+      ML_THRESHOLDS_WARNING: 0.55
+      ML_THRESHOLDS_CRITICAL: 0.70
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../apps/api:/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  worker:
+    build:
+      context: ../apps/api
+      dockerfile: Dockerfile
+    container_name: lews-worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://lews:lews_dev@postgres:5432/lews
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-dev-secret-key-change-in-prod}
+      HMAC_SECRET: ${HMAC_SECRET:-dev-hmac-secret-change-in-prod}
+      TWILIO_ACCOUNT_SID: ${TWILIO_ACCOUNT_SID:-}
+      TWILIO_AUTH_TOKEN: ${TWILIO_AUTH_TOKEN:-}
+      TWILIO_FROM_NUMBER: ${TWILIO_FROM_NUMBER:-}
+      SENDGRID_API_KEY: ${SENDGRID_API_KEY:-}
+      SENDGRID_FROM_EMAIL: ${SENDGRID_FROM_EMAIL:-noreply@lews.dev}
+      ML_MODEL_PATH: /app/ml/model_v1.joblib
+      ML_THRESHOLDS_WATCH: 0.30
+      ML_THRESHOLDS_WARNING: 0.55
+      ML_THRESHOLDS_CRITICAL: 0.70
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ../apps/api:/app
+    command: python -m app.workers
+
+  web:
+    build:
+      context: ..
+      dockerfile: apps/web/Dockerfile
+    container_name: lews-web
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_WS_URL: ws://localhost:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+    working_dir: /repo/apps/web
+    volumes:
+      - ../:/repo
+    command: pnpm dev
+
+  simulator:
+    build:
+      context: ../services/simulator
+      dockerfile: Dockerfile
+    container_name: lews-simulator
+    environment:
+      API_URL: http://api:8000
+      HMAC_SECRET: ${HMAC_SECRET:-dev-hmac-secret-change-in-prod}
+      SPEEDUP: 60
+    depends_on:
+      - api
+    volumes:
+      - ../services/simulator:/app
+    command: python app.py
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: lews-mailhog
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+volumes:
+  postgres_data:
+  redis_data:
